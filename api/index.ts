@@ -1,8 +1,13 @@
 import express from "express";
 import Database from "better-sqlite3";
 import path from "path";
+import fs from "fs";
 
-const db = new Database("nexa.db");
+// Vercel environment check: Use /tmp for the database because the rest of the filesystem is read-only.
+const isVercel = process.env.VERCEL === "1";
+const dbPath = isVercel ? "/tmp/nexa.db" : path.join(process.cwd(), "nexa.db");
+
+const db = new Database(dbPath);
 
 // Initialize Database
 db.exec(`
