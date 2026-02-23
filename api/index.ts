@@ -1,70 +1,68 @@
 import express from "express";
 import Database from "better-sqlite3";
 import path from "path";
-import fs from "fs";
 
 // Vercel environment check: Use /tmp for the database because the rest of the filesystem is read-only.
 const isVercel = process.env.VERCEL === "1";
 const dbPath = isVercel ? "/tmp/nexa.db" : path.join(process.cwd(), "nexa.db");
 
+// Initialize Database Connection
 const db = new Database(dbPath);
 
-// Initialize Database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT,
-    email TEXT
-  );
+// Ensure tables exist on every cold start
+function initDb() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE,
+      password TEXT,
+      email TEXT
+    );
 
-  CREATE TABLE IF NOT EXISTS staff (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    email TEXT,
-    mobile TEXT,
-    degree TEXT,
-    skills TEXT,
-    languages TEXT,
-    father_name TEXT,
-    mother_name TEXT,
-    country TEXT,
-    state TEXT,
-    city TEXT,
-    address TEXT,
-    pincode TEXT,
-    image TEXT
-  );
+    CREATE TABLE IF NOT EXISTS staff (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT, email TEXT, mobile TEXT, degree TEXT, skills TEXT, 
+      languages TEXT, father_name TEXT, mother_name TEXT, country TEXT, 
+      state TEXT, city TEXT, address TEXT, pincode TEXT, image TEXT
+    );
 
-  CREATE TABLE IF NOT EXISTS projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    description TEXT,
-    head_id INTEGER,
-    completion_date TEXT,
-    status TEXT DEFAULT 'Planning',
-    FOREIGN KEY(head_id) REFERENCES staff(id)
-  );
+    CREATE TABLE IF NOT EXISTS projects (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT, description TEXT, head_id INTEGER, completion_date TEXT, 
+      status TEXT DEFAULT 'Planning',
+      FOREIGN KEY(head_id) REFERENCES staff(id)
+    );
 
-  CREATE TABLE IF NOT EXISTS project_members (
-    project_id INTEGER,
-    staff_id INTEGER,
-    FOREIGN KEY(project_id) REFERENCES projects(id),
-    FOREIGN KEY(staff_id) REFERENCES staff(id)
-  );
-`);
+    CREATE TABLE IF NOT EXISTS project_members (
+      project_id INTEGER, staff_id INTEGER,
+      FOREIGN KEY(project_id) REFERENCES projects(id),
+      FOREIGN KEY(staff_id) REFERENCES staff(id)
+    );
+  `);
+}
+
+initDb();
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
+// Health check for Vercel
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", environment: isVercel ? "vercel" : "local", dbPath });
+});
+
 // API Routes
 app.post("/api/auth/login", (req, res) => {
   const { username, password } = req.body;
-  const user = db.prepare("SELECT * FROM users WHERE (username = ? OR email = ?) AND password = ?").get(username, username, password);
-  if (user) {
-    res.json({ success: true, user: { id: user.id, username: user.username } });
-  } else {
-    res.status(401).json({ success: false, message: "Invalid credentials" });
+  try {
+    const user = db.prepare("SELECT * FROM users WHERE (username = ? OR email = ?) AND password = ?").get(username, username, password);
+    if (user) {
+      res.json({ success: true, user: { id: user.id, username: user.username } });
+    } else {
+      res.status(401).json({ success: false, message: "Invalid credentials" });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Login failed" });
   }
 });
 
@@ -74,22 +72,30 @@ app.post("/api/auth/create", (req, res) => {
     const info = db.prepare("INSERT INTO users (username, password, email) VALUES (?, ?, ?)").run(username, password, email);
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (e) {
-    res.status(400).json({ success: false, message: "Username already exists" });
+    res.status(400).json({ success: false, message: "Username or Email already exists" });
   }
 });
 
 app.get("/api/staff", (req, res) => {
-  const staff = db.prepare("SELECT * FROM staff").all();
-  res.json(staff);
+  try {
+    const staff = db.prepare("SELECT * FROM staff").all();
+    res.json(staff);
+  } catch (err) {
+    res.status(500).json([]);
+  }
 });
 
 app.post("/api/staff", (req, res) => {
   const s = req.body;
-  const info = db.prepare(`
-    INSERT INTO staff (name, email, mobile, degree, skills, languages, father_name, mother_name, country, state, city, address, pincode, image)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(s.name, s.email, s.mobile, s.degree, s.skills, s.languages, s.father_name, s.mother_name, s.country, s.state, s.city, s.address, s.pincode, s.image);
-  res.json({ success: true, id: info.lastInsertRowid });
+  try {
+    const info = db.prepare(`
+      INSERT INTO staff (name, email, mobile, degree, skills, languages, father_name, mother_name, country, state, city, address, pincode, image)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(s.name, s.email, s.mobile, s.degree, s.skills, s.languages, s.father_name, s.mother_name, s.country, s.state, s.city, s.address, s.pincode, s.image);
+    res.json({ success: true, id: info.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Failed to create staff" });
+  }
 });
 
 app.put("/api/staff/:id", (req, res) => {
@@ -110,8 +116,7 @@ app.put("/api/staff/:id", (req, res) => {
       res.status(404).json({ success: false, message: "Staff member not found" });
     }
   } catch (error) {
-    console.error("Update error:", error);
-    res.status(500).json({ success: false, message: "Internal server error" });
+    res.status(500).json({ success: false, message: "Update failed" });
   }
 });
 
@@ -122,51 +127,55 @@ app.delete("/api/staff/:id", (req, res) => {
     db.prepare("DELETE FROM project_members WHERE staff_id = ?").run(staffId);
     db.prepare("UPDATE projects SET head_id = NULL WHERE head_id = ?").run(staffId);
     const info = db.prepare("DELETE FROM staff WHERE id = ?").run(staffId);
-    if (info.changes > 0) {
-      res.json({ success: true });
-    } else {
-      res.status(404).json({ success: false, message: "Staff member not found" });
-    }
+    res.json({ success: info.changes > 0 });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Internal server error" });
+    res.status(500).json({ success: false });
   }
 });
 
 app.get("/api/projects", (req, res) => {
-  const projects = db.prepare(`
-    SELECT p.*, s.name as head_name 
-    FROM projects p 
-    LEFT JOIN staff s ON p.head_id = s.id
-  `).all();
-  
-  const projectsWithMembers = projects.map(p => {
-    const members = db.prepare(`
-      SELECT s.* FROM staff s
-      JOIN project_members pm ON s.id = pm.staff_id
-      WHERE pm.project_id = ?
-    `).all(p.id);
-    return { ...p, members };
-  });
-  
-  res.json(projectsWithMembers);
+  try {
+    const projects = db.prepare(`
+      SELECT p.*, s.name as head_name 
+      FROM projects p 
+      LEFT JOIN staff s ON p.head_id = s.id
+    `).all();
+    
+    const projectsWithMembers = projects.map(p => {
+      const members = db.prepare(`
+        SELECT s.* FROM staff s
+        JOIN project_members pm ON s.id = pm.staff_id
+        WHERE pm.project_id = ?
+      `).all(p.id);
+      return { ...p, members };
+    });
+    
+    res.json(projectsWithMembers);
+  } catch (err) {
+    res.status(500).json([]);
+  }
 });
 
 app.post("/api/projects", (req, res) => {
   const { name, description, head_id, completion_date, member_ids } = req.body;
-  const info = db.prepare(`
-    INSERT INTO projects (name, description, head_id, completion_date)
-    VALUES (?, ?, ?, ?)
-  `).run(name, description, head_id, completion_date);
-  
-  const projectId = info.lastInsertRowid;
-  const insertMember = db.prepare("INSERT INTO project_members (project_id, staff_id) VALUES (?, ?)");
-  
-  if (member_ids && Array.isArray(member_ids)) {
-    for (const staffId of member_ids) {
-      insertMember.run(projectId, staffId);
+  try {
+    const info = db.prepare(`
+      INSERT INTO projects (name, description, head_id, completion_date)
+      VALUES (?, ?, ?, ?)
+    `).run(name, description, head_id, completion_date);
+    
+    const projectId = info.lastInsertRowid;
+    const insertMember = db.prepare("INSERT INTO project_members (project_id, staff_id) VALUES (?, ?)");
+    
+    if (member_ids && Array.isArray(member_ids)) {
+      for (const staffId of member_ids) {
+        insertMember.run(projectId, staffId);
+      }
     }
+    res.json({ success: true, id: projectId });
+  } catch (err) {
+    res.status(500).json({ success: false });
   }
-  res.json({ success: true, id: projectId });
 });
 
 app.delete("/api/projects/:id", (req, res) => {
@@ -175,13 +184,9 @@ app.delete("/api/projects/:id", (req, res) => {
     const projectId = parseInt(id);
     db.prepare("DELETE FROM project_members WHERE project_id = ?").run(projectId);
     const info = db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
-    if (info.changes > 0) {
-      res.json({ success: true });
-    } else {
-      res.status(404).json({ success: false, message: "Project not found" });
-    }
+    res.json({ success: info.changes > 0 });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Internal server error" });
+    res.status(500).json({ success: false });
   }
 });
 
